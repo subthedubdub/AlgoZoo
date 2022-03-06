@@ -1,4 +1,4 @@
-// taskrunner.js -- an incremental,
+// make.js -- an incremental,
 // async DAG-based task runner
 
 // A Task represents a procedure to execute when
