@@ -1,0 +1,234 @@
+:PROPERTIES:
+:ID:      diy-arrays-in-julia
+:AUTHOR:  Michael Kovarik
+:TAGS:    julia data-structures bare-metal
+:DATE:    3000-01-01
+:UPDATED: 3000-01-01
+:END:
+
+#+title: DIY Arrays in Julia
+
+The =Array= type is one of the most widely-used built-ins Julia programming
+language. And it is a performant and versatile.
+
+In this post, we will attempt to create our own =Array= implementation. We
+begin by making a few convenient imports:
+
+#+begin_src julia :tangle yes
+import Base.Libc: malloc, free, realloc
+import Base: getindex, setindex!, firstindex, lastindex
+using Test
+#+end_src
+
+#+RESULTS:
+
+* The Buffer
+
+Before we implement the array, it is useful to first establish a low-level
+interface to system memory. In particular, we want the ability to load and
+retrieve a sequence of homogenously-typed objects in a contiguous chunk of
+virtual memory. We will call such a container a *buffer*, which is roughly
+analogous to an array in C.
+
+The following functionality will be implemented:
+
+- A constructor function which creates a buffer by allocating system memory
+  (=DataBuffer()=)
+- A constructor function which creates a buffer as a zero-copy "view" on
+  an existing buffer (=ViewBuffer()=).
+- Safe point access methods (=getindex=, =setindex!=, =fistindex=, =lastindex=).
+- The ability to efficiently copy data from one buffer into another buffer.
+- The ability to resize a =DataBuffer=.
+- Automatic, safe freeing of buffer data.
+
+** Pointers and Memory Management
+
+Our buffer implementation is really low-level. It requires that we make use
+of Julia's memory management interfaces.
+
+They key is to use pointers, represented in Julia as the parametrized
+=Ptr{T}= type. An instance =Ptr{T}= represents a
+C-like pointer to an object of type =T=. For arrays and mutable structs,
+one can extract a pointer by invoking =pointer_from_objref(obj)=.
+
+
+** Constructing a Buffer
+
+A =Buffer= object contains two attributes: the address corresponding to the
+first item of the buffer, and the number of items in the buffer.
+
+#+begin_src julia :tangle yes
+mutable struct DataBuffer{T}
+    addr::Ptr{T}
+    size::Int
+end
+
+DataBuffer{T}(size::Int) where T = begin
+    bytewidth = size * sizeof(T)
+    ptr_alloc = malloc(bytewidth)
+    ptr_alloc == C_NULL && throw("Memory Allocation Failed")
+    buff = DataBuffer{T}(Ptr{T}(ptr_alloc), size)
+    finalizer(buff) do b
+        Base.Libc.free(b.addr)
+    end
+    return buff
+end
+#+end_src
+
+Some notes:
+
+- The =sizeof(T)= function returns the number of bytes required
+  to store an object of type =T= (not including the sizes of any
+  referenced objects).
+- =Base.Libc.malloc(size)= allocates =size= bytes of data and
+  returns the address of the first byte. However, it may fail,
+  returning instead a null pointer (=C_NULL=). We check for this
+  and throw an exception.
+- The function passed into =finalizer(f, x)= gets called whenever
+  =x= gets garbaged-collected. In our case, we use it to call
+  =Base.Libc.free(ptr)=, which frees up the memory allocated by
+  our previous call to =malloc=. Failing to do this would result
+  in a memory-leak.
+
+** Point Access Methods
+
+#+begin_src julia :tangle yes
+setindex!(buff::DataBuffer{T}, obj::T, idx::Int) where T = begin
+    @boundscheck idx <= buff.size || throw(BoundsError("Out of Bounds"))
+    unsafe_store!(buff.addr, obj, idx)
+end
+
+getindex(buff::DataBuffer{T}, idx::Int) where T = begin
+    @boundscheck idx <= buff.size || throw(BoundsError("Out of Bounds"))
+    unsafe_load(buff.addr, idx)
+end
+
+firstindex(buff::DataBuffer) = 1
+lastindex(buff::DataBuffer) = buff.size
+#+end_src
+
+Some notes:
+
+- Extending these four =Base= methods to accept =Buffer= objects allows ua to use Julia's built-in indexing
+  syntax (e.g. =buff[idx]=val=) for loading and retrieving data.
+- The =@boundscheck= macro tags a piece of code. It can be elided when the enclosing function is called with
+  =@inbounds=. This is a minor optimization.
+- =getindex= does not check if the data has been initialized. That is, calling =getindex= before =setindex!=
+  will return garbage.
+
+We are now in a position to add some basic unit testing:
+
+#+begin_src julia :tangle yes
+@testset "BufferAccessTests" begin
+    buff = DataBuffer{Float64}(16)
+    @test buff.size == 16
+    buff[6] = 3.14
+    @test buff[6] == 3.14
+    @test_throws BoundsError buff[17]
+    @test_throws BoundsError buff[17] = buff[6]
+end
+#+end_src
+
+** Resizing a Buffer
+
+#+begin_src julia :tangle yes
+resize!(buff::DataBuffer{T}, size::Int) where T = begin
+    bytewidth = size * sizeof(T)
+    addr = realloc(buff.addr, bytewidth)
+    addr == C_NULL && throw("Failed to reallocate memory buffer")
+    buff.size = size
+    buff.addr = Ptr{T}(addr)
+end
+#+end_src
+
+
+#+begin_src julia :tangle yes
+@testset "BufferResizeTests" begin
+    Point = Tuple{Float64, Float64, Float64}
+    buff = DataBuffer{Point}(4)
+    resize!(buff, 8)
+    @test buff.size == 8
+    @test_throws BoundsError buff[9]
+    @test typeof(buff[8]) == Point
+    resize!(buff, 4)
+    @test_throws BoundsError buff[8]
+end
+#+end_src
+
+
+** Copying Buffer Data
+
+#+begin_src julia :tangle yes
+copy!(src,
+      dest::DataBuffer{T},
+      idxsrc::Int,
+      idxdest::Int,
+      size::Int) where T = begin
+          idxsrcend = idxsrc + size - 1
+          idxdestend = idxdest + size - 1
+          @boundscheck idxsrcend <= src.size || throw(BoundsError())
+          @boundscheck idxdestend <= dest.size || throw(BoundsError())
+          while idxsrc <= idxsrcend
+              dest[idxdest] = src[idxsrc]
+              idxdest += 1
+              idxsrc += 1
+          end
+end
+#+end_src
+
+We omit the type annotation for =src= to allow passing in a =ViewBuffer= (next section).
+
+#+begin_src julia :tangle yes
+@testset "BufferCopyTests" begin
+    buff1 = DataBuffer{Int}(3)
+    buff2 = DataBuffer{Int}(4)
+    foreach(i -> buff1[i] = i, 1:3)
+    foreach(i -> buff2[i] = 0, 1:4)
+    copy!(buff1, buff2, 2, 3, 2)
+    @test (buff2[1] == 0 &&
+           buff2[2] == 0 &&
+           buff2[3] == 2 &&
+           buff2[4] == 3)
+end
+#+end_src
+
+** Buffer Views
+
+In the previous sections, we created the =DataBuffer= class and its.
+
+#+begin_src julia :tangle yes
+mutable struct ViewBuffer{T}
+    dat::DataBuffer{T}
+    offset::Int
+    size::Int
+end
+#+end_src
+
+
+#+begin_src julia :tangle yes
+setindex!(buff::ViewBuffer{T}, obj::T, idx::Int) where T = begin
+    @boundscheck idx <= buff.size || throw(BoundsError())
+    @boundscheck buff.offset + idx - 1 <= buff.dat.size || throw(BoundsError())
+    @inbounds buff.dat[buff.offset + idx - 1] = obj
+end
+
+getindex(buff::ViewBuffer{T}, idx::Int) where T = begin
+    @boundscheck idx <= buff.size || throw(BoundsError())
+    @boundscheck buff.offset + idx - 1 <= buff.dat.size || throw(BoundsError())
+    @inbounds buff.dat[buff.offset + idx - 1]
+end
+
+firstindex(buff::ViewBuffer) = 1
+lastindex(buff::ViewBuffer) = buff.size
+#+end_src
+
+# TODO : Add tests
+
+* Arrays
+
+Our Array implementation will be based off of Buffers (as above), but with a
+number of additional capabilities:
+
+- Support for multi-dimensional indices and views.
+- Fast dequeue interface with automatic resizing.
+- Iterator interface.
