@@ -33,12 +33,10 @@ analogous to an array in C.
 The following functionality will be implemented:
 
 - A constructor function which creates a buffer by allocating system memory
-  (=DataBuffer()=)
-- A constructor function which creates a buffer as a zero-copy "view" on
-  an existing buffer (=ViewBuffer()=).
+  (=Buffer()=)
 - Safe point access methods (=getindex=, =setindex!=, =fistindex=, =lastindex=).
 - The ability to efficiently copy data from one buffer into another buffer.
-- The ability to resize a =DataBuffer=.
+- The ability to resize a =Buffer=.
 - Automatic, safe freeing of buffer data.
 
 ** Pointers and Memory Management
@@ -58,16 +56,16 @@ A =Buffer= object contains two attributes: the address corresponding to the
 first item of the buffer, and the number of items in the buffer.
 
 #+begin_src julia :tangle yes
-mutable struct DataBuffer{T}
+mutable struct Buffer{T}
     addr::Ptr{T}
     size::Int
 end
 
-DataBuffer{T}(size::Int) where T = begin
+Buffer{T}(size::Int) where T = begin
     bytewidth = size * sizeof(T)
     ptr_alloc = malloc(bytewidth)
     ptr_alloc == C_NULL && throw("Memory Allocation Failed")
-    buff = DataBuffer{T}(Ptr{T}(ptr_alloc), size)
+    buff = Buffer{T}(Ptr{T}(ptr_alloc), size)
     finalizer(buff) do b
         Base.Libc.free(b.addr)
     end
@@ -93,18 +91,18 @@ Some notes:
 ** Point Access Methods
 
 #+begin_src julia :tangle yes
-setindex!(buff::DataBuffer{T}, obj::T, idx::Int) where T = begin
+setindex!(buff::Buffer{T}, obj::T, idx::Int) where T = begin
     @boundscheck idx <= buff.size || throw(BoundsError("Out of Bounds"))
     unsafe_store!(buff.addr, obj, idx)
 end
 
-getindex(buff::DataBuffer{T}, idx::Int) where T = begin
+getindex(buff::Buffer{T}, idx::Int) where T = begin
     @boundscheck idx <= buff.size || throw(BoundsError("Out of Bounds"))
     unsafe_load(buff.addr, idx)
 end
 
-firstindex(buff::DataBuffer) = 1
-lastindex(buff::DataBuffer) = buff.size
+firstindex(buff::Buffer) = 1
+lastindex(buff::Buffer) = buff.size
 #+end_src
 
 Some notes:
@@ -120,7 +118,7 @@ We are now in a position to add some basic unit testing:
 
 #+begin_src julia :tangle yes
 @testset "BufferAccessTests" begin
-    buff = DataBuffer{Float64}(16)
+    buff = Buffer{Float64}(16)
     @test buff.size == 16
     buff[6] = 3.14
     @test buff[6] == 3.14
@@ -132,7 +130,7 @@ end
 ** Resizing a Buffer
 
 #+begin_src julia :tangle yes
-resize!(buff::DataBuffer{T}, size::Int) where T = begin
+resize!(buff::Buffer{T}, size::Int) where T = begin
     bytewidth = size * sizeof(T)
     addr = realloc(buff.addr, bytewidth)
     addr == C_NULL && throw("Failed to reallocate memory buffer")
@@ -145,7 +143,7 @@ end
 #+begin_src julia :tangle yes
 @testset "BufferResizeTests" begin
     Point = Tuple{Float64, Float64, Float64}
-    buff = DataBuffer{Point}(4)
+    buff = Buffer{Point}(4)
     resize!(buff, 8)
     @test buff.size == 8
     @test_throws BoundsError buff[9]
@@ -159,8 +157,8 @@ end
 ** Copying Buffer Data
 
 #+begin_src julia :tangle yes
-copy!(src,
-      dest::DataBuffer{T},
+copy!(src::Buffer{T},
+      dest::Buffer{T},
       idxsrc::Int,
       idxdest::Int,
       size::Int) where T = begin
@@ -176,12 +174,11 @@ copy!(src,
 end
 #+end_src
 
-We omit the type annotation for =src= to allow passing in a =ViewBuffer= (next section).
 
 #+begin_src julia :tangle yes
 @testset "BufferCopyTests" begin
-    buff1 = DataBuffer{Int}(3)
-    buff2 = DataBuffer{Int}(4)
+    buff1 = Buffer{Int}(3)
+    buff2 = Buffer{Int}(4)
     foreach(i -> buff1[i] = i, 1:3)
     foreach(i -> buff2[i] = 0, 1:4)
     copy!(buff1, buff2, 2, 3, 2)
@@ -192,43 +189,54 @@ We omit the type annotation for =src= to allow passing in a =ViewBuffer= (next s
 end
 #+end_src
 
-** Buffer Views
-
-In the previous sections, we created the =DataBuffer= class and its.
-
-#+begin_src julia :tangle yes
-mutable struct ViewBuffer{T}
-    dat::DataBuffer{T}
-    offset::Int
-    size::Int
-end
-#+end_src
-
-
-#+begin_src julia :tangle yes
-setindex!(buff::ViewBuffer{T}, obj::T, idx::Int) where T = begin
-    @boundscheck idx <= buff.size || throw(BoundsError())
-    @boundscheck buff.offset + idx - 1 <= buff.dat.size || throw(BoundsError())
-    @inbounds buff.dat[buff.offset + idx - 1] = obj
-end
-
-getindex(buff::ViewBuffer{T}, idx::Int) where T = begin
-    @boundscheck idx <= buff.size || throw(BoundsError())
-    @boundscheck buff.offset + idx - 1 <= buff.dat.size || throw(BoundsError())
-    @inbounds buff.dat[buff.offset + idx - 1]
-end
-
-firstindex(buff::ViewBuffer) = 1
-lastindex(buff::ViewBuffer) = buff.size
-#+end_src
-
-# TODO : Add tests
 
 * Arrays
 
 Our Array implementation will be based off of Buffers (as above), but with a
 number of additional capabilities:
 
-- Support for multi-dimensional indices and views.
-- Fast dequeue interface with automatic resizing.
+- Support for multi-dimensional indices.
+- Support for fast views.
+- Fast dequeue interface for one-dimensional arrays with automatic resizing.
 - Iterator interface.
+
+** Definition
+
+#+begin_src julia :tangle yes
+mutable struct MyArray{T, N} <: AbstractArray{T, N}
+    data::Buffer{T}
+    shape::NTuple{N, Int}
+    offset::Int
+end
+#+end_src
+
+Here, =shape= is the length of the array along each of its =N= dimensions.
+
+** Vectors
+
+A vector is an array with one dimension.
+
+#+begin_src julia :tangle yes
+MyVector{T} = MyArray{T, 1}
+
+# construct an empty vector
+MyVector{T}() where T = MyVector{T}(Buffer{T}(0), (0,))
+
+# Queue interface
+import Base: pop!, push!
+
+pop!(v::MyVector{T}) where T = begin
+    @boundscheck v.shape[0] > 0 || throw(BoundsError())
+    idxbuff = v.shape[0] + v.offset - 1
+    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
+    v.shape[0] -= 1
+    v.data[idxbuff]
+end
+push!(v::MyVector{T}, val::T) where T = begin
+    (v.shape[0] < v.data.size) || resize!(v.data, 2 * v.data.size + 1)
+    idxbuff = v.shape[0] + v.offset - 1
+    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
+    @inbounds v.data[idxbuff] = val
+    v.shape[0] += 1
+end
+#+end_src
