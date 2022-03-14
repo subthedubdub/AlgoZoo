@@ -64,15 +64,15 @@ copy!(src::Buffer{T},
       idxsrc::Int,
       idxdest::Int,
       size::Int) where T = begin
-          idxsrcend = idxsrc + size - 1
-          idxdestend = idxdest + size - 1
-          @boundscheck idxsrcend <= src.size || throw(BoundsError())
-          @boundscheck idxdestend <= dest.size || throw(BoundsError())
-          while idxsrc <= idxsrcend
-              dest[idxdest] = src[idxsrc]
-              idxdest += 1
-              idxsrc += 1
-          end
+    idxsrcend = idxsrc + size - 1
+    idxdestend = idxdest + size - 1
+    @boundscheck idxsrcend <= src.size || throw(BoundsError())
+    @boundscheck idxdestend <= dest.size || throw(BoundsError())
+    while idxsrc <= idxsrcend
+        dest[idxdest] = src[idxsrc]
+        idxdest += 1
+        idxsrc += 1
+    end
 end
 
 @testset "BufferCopyTests" begin
