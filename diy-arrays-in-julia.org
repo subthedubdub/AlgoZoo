@@ -7,12 +7,12 @@
 :END:
 
 #+title: DIY Arrays in Julia
+#+auto_tangle: t
 
-The =Array= type is one of the most widely-used built-ins Julia programming
-language. And it is a performant and versatile.
+We go over how to implement a multidimensional array in Julia,
+similar to the =Array= built-in.
 
-In this post, we will attempt to create our own =Array= implementation. We
-begin by making a few convenient imports:
+First, some useful imports:
 
 #+begin_src julia :tangle yes
 import Base.Libc: malloc, free, realloc
@@ -66,9 +66,7 @@ Buffer{T}(size::Int) where T = begin
     ptr_alloc = malloc(bytewidth)
     ptr_alloc == C_NULL && throw("Memory Allocation Failed")
     buff = Buffer{T}(Ptr{T}(ptr_alloc), size)
-    finalizer(buff) do b
-        Base.Libc.free(b.addr)
-    end
+    finalizer(b -> free(b.addr), buff)
     return buff
 end
 #+end_src
@@ -87,6 +85,8 @@ Some notes:
   =Base.Libc.free(ptr)=, which frees up the memory allocated by
   our previous call to =malloc=. Failing to do this would result
   in a memory-leak.
+- The Julia compiler is smart. The calculation of =bytewidth= is
+  done at compile-time.
 
 ** Point Access Methods
 
@@ -205,12 +205,113 @@ number of additional capabilities:
 #+begin_src julia :tangle yes
 mutable struct MyArray{T, N} <: AbstractArray{T, N}
     data::Buffer{T}
-    shape::NTuple{N, Int}
+    size::NTuple{N, Int}
+    len::Int
     offset::Int
+end
+
+MyArray{T,N}(size...) where {T,N} = begin
+    len = prod(size)
+    data = Buffer{T}(len)
+    MyArray{T,N}(data, size, len, 1)
 end
 #+end_src
 
-Here, =shape= is the length of the array along each of its =N= dimensions.
+Here, =size= is the length of the array along each of its =N= dimensions. For
+example, if the shape of our array is =(2,3,6)=, then the array contains 36 items
+(=2*3*6=). Such an array is indexed by a triplet of integers =(i, j, k)=, where
+=i= ranges from 1 to 2, =j= ranges from 1 to 3, and =k= ranges from 1 to 6. The
+=len= is just the product of the integers in =size=. This can be calculated on the
+fly. But it is used for index lookups, so caching it is faster.
+
+The =offset= attribute specifies where the array "begins" in the underlying data
+buffer. It can range from 1 to =data.size=, inclusive. Allowing arbitrary
+offsets makes it possible to implement fast =pushfirst!= and =popfirst!= methods.
+
+
+#+begin_src julia :tangle yes
+@testset "ArrayTests" begin
+    arr = MyArray{Float64,2}(3,2)
+    @test arr.data.size == 6
+end
+#+end_src
+
+
+** Indexing
+
+Before we begin, it is good to have some helper function that converts between
+cartesian and linear indices:
+
+#+begin_src julia :tangle yes
+cartesian2linear(A::Array{T,N}, I) where {T,N} = begin
+    idx = offset + I[1]
+    cumprod = 1
+    for k in 2:length(size)
+        cumprod *= size[k - 1]
+        idx += I[k] * cumprod
+    end
+    idx = idx > len ? idx - len : idx
+    return idx
+end
+#+end_src
+
+Let us imagine that the offset is 1. Denote the size tuple as \((s_1, s_2, \ldots, s_N)\).
+And denote the index tuple as \((i_1, i_2, \ldots, i_N)\). The
+corresponding linear index is:
+
+\[1 + \sum_{k=1}^{N}(i_k-1)\prod_{j=1}^{k-1}s_j\]
+
+This mapping is bijective. That is, it establishes a one-to-one mapping between all
+cartesian and linear indices within range. Note that this is not the only such mapping
+with this property.
+
+Since the array data may not begin at the start of the buffer data (=offset>1=),
+we must also add some code to "wrap around" to the beginning of the buffer.
+
+#+begin_src julia :tangle yes
+import Base: size
+
+size(a::MyArray) = a.size
+
+getindex(A::MyArray{T,N}, I::Vararg{Int,N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff]
+end
+
+setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int,N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff] = v
+end
+#+end_src
+
+
+#+begin_src julia :tangle yes
+@testset "ArrayBasicTests" begin
+    sizes = [(1,),
+             (1,1),
+             (1,4),
+             (4,1),
+             (4,6),
+             (2,3,4)]
+    for size in sizes
+        N = length(size)
+        arr = MyArray{Tuple{Int, Int}, N}()
+        for idx in eachindex(arr)
+            arr[idx...] = idx
+            @test arr[idx...] == idx
+        end
+    end
+end
+#+end_src
+
+** Optimizing Index Calculation
+
+For cache-local access, access computation is dominated by index computation. To retrieve even a single
+element of
+$(s_1, \ldots, s_N)$,
+
 
 ** Vectors
 

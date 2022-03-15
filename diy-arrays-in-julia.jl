@@ -12,9 +12,7 @@ Buffer{T}(size::Int) where T = begin
     ptr_alloc = malloc(bytewidth)
     ptr_alloc == C_NULL && throw("Memory Allocation Failed")
     buff = Buffer{T}(Ptr{T}(ptr_alloc), size)
-    finalizer(buff) do b
-        Base.Libc.free(b.addr)
-    end
+    finalizer(b -> free(b.addr), buff)
     return buff
 end
 
@@ -89,8 +87,65 @@ end
 
 mutable struct MyArray{T, N} <: AbstractArray{T, N}
     data::Buffer{T}
-    shape::NTuple{N, Int}
+    size::NTuple{N, Int}
+    len::Int
     offset::Int
+end
+
+MyArray{T,N}(size...) where {T,N} = begin
+    len = prod(size)
+    data = Buffer{T}(len)
+    MyArray{T,N}(data, size, len, 1)
+end
+
+@testset "ArrayTests" begin
+    arr = MyArray{Float64,2}(3,2)
+    @test arr.data.size == 6
+end
+
+cartesian2linear(A::Array{T,N}, I) where {T,N} = begin
+    idx = offset + I[1]
+    cumprod = 1
+    for k in 2:length(size)
+        cumprod *= size[k - 1]
+        idx += I[k] * cumprod
+    end
+    idx = idx > len ? idx - len : idx
+    return idx
+end
+
+import Base: size
+
+size(a::MyArray) = a.size
+
+getindex(A::MyArray{T,N}, I::Vararg{Int,N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff]
+end
+
+setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int,N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff] = v
+end
+
+@testset "ArrayBasicTests" begin
+    sizes = ((1,),
+             (1,1),
+             (1,4),
+             (4,1),
+             (4,6),
+             (2,3,4))
+    println(sizes)
+    for size in sizes
+        N = length(size)
+        arr = MyArray{Tuple{Int, Int}, N}()
+        for idx in eachindex(arr)
+            arr[idx...] = idx
+            @test arr[idx...] == idx
+        end
+    end
 end
 
 MyVector{T} = MyArray{T, 1}
