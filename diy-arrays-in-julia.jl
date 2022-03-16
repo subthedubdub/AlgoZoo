@@ -103,14 +103,14 @@ end
     @test arr.data.size == 6
 end
 
-cartesian2linear(A::Array{T,N}, I) where {T,N} = begin
-    idx = offset + I[1]
+cartesian2linear(A::MyArray{T,N}, I) where {T,N} = begin
+    idx = A.offset + I[1]
     cumprod = 1
-    for k in 2:length(size)
-        cumprod *= size[k - 1]
+    for k in 2:length(A.size)
+        cumprod *= A.size[k - 1]
         idx += I[k] * cumprod
     end
-    idx = idx > len ? idx - len : idx
+    idx = idx > A.len ? idx - A.len : idx
     return idx
 end
 
@@ -118,33 +118,23 @@ import Base: size
 
 size(a::MyArray) = a.size
 
-getindex(A::MyArray{T,N}, I::Vararg{Int,N}) where {T,N} = begin
+getindex(A::MyArray{T,N}, I::Vararg{Int, N}) where {T,N} = begin
     @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
     idxbuff = cartesian2linear(A, I)
     @inbounds A.data[idxbuff]
 end
 
-setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int,N}) where {T,N} = begin
+setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int, N}) where {T,N} = begin
     @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
     idxbuff = cartesian2linear(A, I)
     @inbounds A.data[idxbuff] = v
 end
 
 @testset "ArrayBasicTests" begin
-    sizes = ((1,),
-             (1,1),
-             (1,4),
-             (4,1),
-             (4,6),
-             (2,3,4))
-    println(sizes)
-    for size in sizes
-        N = length(size)
-        arr = MyArray{Tuple{Int, Int}, N}()
-        for idx in eachindex(arr)
-            arr[idx...] = idx
-            @test arr[idx...] == idx
-        end
+    arr = MyArray{NTuple{2, Int}, 2}(3,2)
+    for i in 1:3, j in 1:2
+        arr[i, j] = (i, j)
+        @test arr[i, j] == (i, j)
     end
 end
 
