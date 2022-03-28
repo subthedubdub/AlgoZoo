@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+  <head></head>
+  <body>
+    <title>{post.title}</title>
+    <div class="content">
+      {post.content}
+    </div>
+  </body>
+</html>

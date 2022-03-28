@@ -1,0 +1,8 @@
+{
+    "render": {
+        "dist/{POST}/{POST}.html": {
+            method: "ORG",
+            template: "post.template"
+        }
+    }
+}
