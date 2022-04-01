@@ -1,0 +1,75 @@
+mutable struct MyArray{T, N} <: AbstractArray{T, N}
+    data::Buffer{T}
+    size::NTuple{N, Int}
+    len::Int
+    offset::Int
+end
+
+MyArray{T,N}(size...) where {T,N} = begin
+    len = prod(size)
+    data = Buffer{T}(len)
+    MyArray{T,N}(data, size, len, 1)
+end
+
+@testset "ArrayTests" begin
+    arr = MyArray{Float64,2}(3,2)
+    @test arr.data.size == 6
+end
+
+cartesian2linear(A::MyArray{T,N}, I) where {T,N} = begin
+    idx = A.offset + I[1]
+    cumprod = 1
+    for k in 2:length(A.size)
+        cumprod *= A.size[k - 1]
+        idx += I[k] * cumprod
+    end
+    idx = idx > A.len ? idx - A.len : idx
+    return idx
+end
+
+import Base: size
+
+size(a::MyArray) = a.size
+
+getindex(A::MyArray{T,N}, I::Vararg{Int, N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff]
+end
+
+setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int, N}) where {T,N} = begin
+    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
+    idxbuff = cartesian2linear(A, I)
+    @inbounds A.data[idxbuff] = v
+end
+
+@testset "ArrayBasicTests" begin
+    arr = MyArray{NTuple{2, Int}, 2}(3,2)
+    for i in 1:3, j in 1:2
+        arr[i, j] = (i, j)
+        @test arr[i, j] == (i, j)
+    end
+end
+
+MyVector{T} = MyArray{T, 1}
+
+# construct an empty vector
+MyVector{T}() where T = MyVector{T}(Buffer{T}(0), (0,))
+
+# Queue interface
+import Base: pop!, push!
+
+pop!(v::MyVector{T}) where T = begin
+    @boundscheck v.shape[0] > 0 || throw(BoundsError())
+    idxbuff = v.shape[0] + v.offset - 1
+    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
+    v.shape[0] -= 1
+    v.data[idxbuff]
+end
+push!(v::MyVector{T}, val::T) where T = begin
+    (v.shape[0] < v.data.size) || resize!(v.data, 2 * v.data.size + 1)
+    idxbuff = v.shape[0] + v.offset - 1
+    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
+    @inbounds v.data[idxbuff] = val
+    v.shape[0] += 1
+end

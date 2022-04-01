@@ -1,13 +1,12 @@
 :PROPERTIES:
-:ID:      diy-arrays-in-julia
+:ID:      diy-arrays-in-julia-1
 :AUTHOR:  Michael Kovarik
 :TAGS:    julia data-structures bare-metal
 :DATE:    3000-01-01
 :UPDATED: 3000-01-01
 :END:
 
-#+title: DIY Arrays in Julia
-#+auto_tangle: t
+#+title: DIY Arrays in Julia (Part I: The Buffer)
 
 We go over how to implement a multidimensional array in Julia,
 similar to the =Array= built-in.
@@ -20,7 +19,6 @@ import Base: getindex, setindex!, firstindex, lastindex
 using Test
 #+end_src
 
-#+RESULTS:
 
 * The Buffer
 
@@ -39,7 +37,7 @@ The following functionality will be implemented:
 - The ability to resize a =Buffer=.
 - Automatic, safe freeing of buffer data.
 
-** Pointers and Memory Management
+* Pointers and Memory Management
 
 Our buffer implementation is really low-level. It requires that we make use
 of Julia's memory management interfaces.
@@ -50,7 +48,7 @@ C-like pointer to an object of type =T=. For arrays and mutable structs,
 one can extract a pointer by invoking =pointer_from_objref(obj)=.
 
 
-** Constructing a Buffer
+* Constructing a Buffer
 
 A =Buffer= object contains two attributes: the address corresponding to the
 first item of the buffer, and the number of items in the buffer.
@@ -88,7 +86,7 @@ Some notes:
 - The Julia compiler is smart. The calculation of =bytewidth= is
   done at compile-time.
 
-** Point Access Methods
+* Point Access Methods
 
 #+begin_src julia :tangle yes
 setindex!(buff::Buffer{T}, obj::T, idx::Int) where T = begin
@@ -127,7 +125,7 @@ We are now in a position to add some basic unit testing:
 end
 #+end_src
 
-** Resizing a Buffer
+* Resizing a Buffer
 
 #+begin_src julia :tangle yes
 resize!(buff::Buffer{T}, size::Int) where T = begin
@@ -154,7 +152,7 @@ end
 #+end_src
 
 
-** Copying Buffer Data
+* Copying Buffer Data
 
 #+begin_src julia :tangle yes
 copy!(src::Buffer{T},
@@ -186,154 +184,5 @@ end
            buff2[2] == 0 &&
            buff2[3] == 2 &&
            buff2[4] == 3)
-end
-#+end_src
-
-
-* Arrays
-
-Our Array implementation will be based off of Buffers (as above), but with a
-number of additional capabilities:
-
-- Support for multi-dimensional indices.
-- Support for fast views.
-- Fast dequeue interface for one-dimensional arrays with automatic resizing.
-- Iterator interface.
-
-** Definition
-
-#+begin_src julia :tangle yes
-mutable struct MyArray{T, N} <: AbstractArray{T, N}
-    data::Buffer{T}
-    size::NTuple{N, Int}
-    len::Int
-    offset::Int
-end
-
-MyArray{T,N}(size...) where {T,N} = begin
-    len = prod(size)
-    data = Buffer{T}(len)
-    MyArray{T,N}(data, size, len, 1)
-end
-#+end_src
-
-Here, =size= is the length of the array along each of its =N= dimensions. For
-example, if the shape of our array is =(2,3,6)=, then the array contains 36 items
-(=2*3*6=). Such an array is indexed by a triplet of integers =(i, j, k)=, where
-=i= ranges from 1 to 2, =j= ranges from 1 to 3, and =k= ranges from 1 to 6. The
-=len= is just the product of the integers in =size=. This can be calculated on the
-fly. But it is used for index lookups, so caching it is faster.
-
-The =offset= attribute specifies where the array "begins" in the underlying data
-buffer. It can range from 1 to =data.size=, inclusive. Allowing arbitrary
-offsets makes it possible to implement fast =pushfirst!= and =popfirst!= methods.
-
-
-#+begin_src julia :tangle yes
-@testset "ArrayTests" begin
-    arr = MyArray{Float64,2}(3,2)
-    @test arr.data.size == 6
-end
-#+end_src
-
-
-** Indexing
-
-Before we begin, it is good to have some helper function that converts between
-cartesian and linear indices:
-
-#+begin_src julia :tangle yes
-cartesian2linear(A::MyArray{T,N}, I) where {T,N} = begin
-    idx = A.offset + I[1]
-    cumprod = 1
-    for k in 2:length(A.size)
-        cumprod *= A.size[k - 1]
-        idx += I[k] * cumprod
-    end
-    idx = idx > A.len ? idx - A.len : idx
-    return idx
-end
-#+end_src
-
-Let us imagine that the offset is 1. Denote the size tuple as \((s_1, s_2, \ldots, s_N)\).
-And denote the index tuple as \((i_1, i_2, \ldots, i_N)\). The
-corresponding linear index is:
-
-\[1 + \sum_{k=1}^{N}(i_k-1)\prod_{j=1}^{k-1}s_j\]
-
-This mapping is bijective. That is, it establishes a one-to-one mapping between all
-cartesian and linear indices within range. Note that this is not the only such mapping
-with this property. Other mappings may even result in better performance depending on
-access patterns.
-
-Since the array data may not begin at the start of the buffer data (=offset>1=),
-we must also add some code to "wrap around" to the beginning of the buffer.
-
-#+begin_src julia :tangle yes
-import Base: size
-
-size(a::MyArray) = a.size
-
-getindex(A::MyArray{T,N}, I::Vararg{Int, N}) where {T,N} = begin
-    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
-    idxbuff = cartesian2linear(A, I)
-    @inbounds A.data[idxbuff]
-end
-
-setindex!(A::MyArray{T,N}, v::T, I::Vararg{Int, N}) where {T,N} = begin
-    @boundscheck all(i <= len for (i, len) in zip(I, A.size)) || throw(BoundsError())
-    idxbuff = cartesian2linear(A, I)
-    @inbounds A.data[idxbuff] = v
-end
-#+end_src
-
-
-And, of course, some basic tests:
-
-#+begin_src julia :tangle yes
-@testset "ArrayBasicTests" begin
-    arr = MyArray{NTuple{2, Int}, 2}(3,2)
-    for i in 1:3, j in 1:2
-        arr[i, j] = (i, j)
-        @test arr[i, j] == (i, j)
-    end
-end
-#+end_src
-
-#+RESULTS:
-
-** Optimizing Index Calculation
-
-For cache-local access, access computation is dominated by index computation. To retrieve even a single
-element of
-$(s_1, \ldots, s_N)$,
-
-
-** Vectors
-
-A vector is an array with one dimension.
-
-#+begin_src julia :tangle yes
-MyVector{T} = MyArray{T, 1}
-
-# construct an empty vector
-MyVector{T}() where T = MyVector{T}(Buffer{T}(0), (0,))
-
-# Queue interface
-import Base: pop!, push!
-
-pop!(v::MyVector{T}) where T = begin
-    @boundscheck v.shape[0] > 0 || throw(BoundsError())
-    idxbuff = v.shape[0] + v.offset - 1
-    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
-    v.shape[0] -= 1
-    v.data[idxbuff]
-end
-push!(v::MyVector{T}, val::T) where T = begin
-    (v.shape[0] < v.data.size) || resize!(v.data, 2 * v.data.size + 1)
-    idxbuff = v.shape[0] + v.offset - 1
-    idxbuff = idxbuff - v.data.size * (idxbuff > v.data.size)
-    @inbounds v.data[idxbuff] = val
-    v.shape[0] += 1
 end
 #+end_src
